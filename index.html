@@ -8,10 +8,39 @@
     <meta http-equiv="Cache-Control" content="max-age=1209600">
 
     <title>LMS Piawai</title>
-    <link rel="canonical" href="https://donat.id/">
+    <link rel="canonical" href="https://lms.piawai.id/">
+
+    <!-- [KEAMANAN] Content-Security-Policy sebagai lapis pertahanan
+         TAMBAHAN (bukan pengganti) escHtml()/sanitizeInput() di
+         script.js — kalau ada payload yang lolos, CSP ini mencegahnya
+         memuat script dari domain lain atau menjalankan inline
+         event-handler yang disuntikkan lewat innerHTML. connect-src
+         mengizinkan panggilan ke mooc-api; sesuaikan kalau origin API
+         berubah. Referensi pola: cms-app (piawai).
+         Catatan: gembok kuis & form drawer di app ini memang memakai
+         inline onclick/onsubmit bawaan (bukan hasil suntikan pengguna),
+         jadi 'unsafe-inline' TETAP diberikan pada script-src supaya
+         fitur yang sudah ada tidak patah — CSP di sini fokus membatasi
+         asal script & koneksi jaringan, lapis utama tetap escHtml(). -->
+    <meta http-equiv="Content-Security-Policy" content="
+        default-src 'self';
+        script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com;
+        style-src 'self' 'unsafe-inline';
+        img-src 'self' https: data:;
+        connect-src 'self' https://mooc-api.sismadi.workers.dev;
+        frame-src https:;
+        object-src 'none';
+        base-uri 'self';
+    ">
+
+    <!-- Percepat koneksi pertama ke API (lihat db.js: API_ORIGIN) —
+         domainnya SAMA PERSIS dengan yang benar-benar dipanggil, beda
+         dari bug preconnect yang ditemukan di referensi cms-app. -->
+    <link rel="preconnect" href="https://mooc-api.sismadi.workers.dev">
+    <link rel="dns-prefetch" href="https://mooc-api.sismadi.workers.dev">
 
     <meta property="og:type" content="website">
-    <meta property="og:url" content="https://donat.id/">
+    <meta property="og:url" content="https://lms.piawai.id/">
     <meta property="og:locale" content="id_ID">
     <meta property="og:title" content="MOOC IPWIJA — Belajar Terbuka & Gratis">
     <meta property="og:description" content="Program Massive Open Online Course (MOOC) sebagai bentuk Pengabdian kepada Masyarakat dosen Informatika IPWIJA — terbuka untuk umum, gratis, tanpa periode gelombang. Modul: Rekayasa Perangkat Lunak, Pemrograman Berorientasi Objek, Robotika.">
@@ -123,8 +152,6 @@
 <script type="text/javascript" src="dosen.js"></script>
 <script type="text/javascript" src="admin.js"></script>
 <script type="text/javascript" src="quiz.js"></script>
-
-<script type="text/javascript" src="config.js"></script>
 
 <script type="text/javascript">
 // Inisialisasi SVG icons

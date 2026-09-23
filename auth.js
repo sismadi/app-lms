@@ -1,181 +1,76 @@
 // ============================================================
-// AUTH — Login sederhana + pembagian peran (peserta / dosen / admin).
+// AUTH — Login/registrasi/lupa-password + pembagian peran.
 // ============================================================
-// Session disimpan di localStorage (key: slsSession), akun diambil dari
-// db.js (tabel 'users'). Mengisi #authSlot (dipanggil dari renderMenu()
-// di index.html) dan menyediakan halaman /?login lewat web.routes —
-// keduanya ditambahkan di sini, TANPA menyentuh script.js.
+// VERSI TER-HARDENING (lihat SECURITY.md untuk penjelasan lengkap):
+//   * Password TIDAK PERNAH dicocokkan di browser lagi. auth.login()
+//     memanggil db.login() -> POST /public?view=login di mooc-api, yang
+//     membandingkan hash di server dan mengembalikan TOKEN sesi — bukan
+//     daftar user.
+//   * Captcha & lockout percobaan login diverifikasi ULANG di SERVER
+//     (rate_limit di D1) — versi localStorage yang lama murni kosmetik,
+//     gampang dilewati lewat DevTools.
+//   * Sesi disimpan sebagai token (moocSessionToken, lihat db.js) +
+//     salinan ringan { username, name, role } untuk tampilan cepat
+//     (moocSessionUser) — BUKAN sumber kebenaran otorisasi (itu selalu
+//     diverifikasi ulang oleh server tiap panggilan /api).
+//   * Form masuk/daftar/lupa-password/reset-password/pengaturan profil
+//     sekarang dibuka lewat DRAWER kanan (lihat AUTO_DRAWER_ROUTES di
+//     script.js) — resolver di bawah TIDAK berubah bentuk (tetap
+//     mengembalikan { rightCol: { fields, onSubmit, ... } }), hanya
+//     titik render-nya yang otomatis dialihkan ke drawer.
 // ============================================================
 const auth = {
-    SESSION_KEY: 'slsSession',
+    SESSION_USER_KEY: 'moocSessionUser',
 
-    // --- Percobaan masuk terbatas (anti brute-force sederhana) ---------
-    // Disimpan di localStorage per-username: { count, lockedUntil }.
-    // Setelah MAX_LOGIN_ATTEMPTS gagal berturut-turut, akun dikunci
-    // sementara selama LOCKOUT_MS sebelum boleh mencoba lagi.
-    ATTEMPTS_KEY: 'slsLoginAttempts',
-    MAX_LOGIN_ATTEMPTS: 3,
-    LOCKOUT_MS: 5 * 60 * 1000, // 5 menit
-
-    // --- Reset password lewat email ------------------------------------
-    // Token berlaku singkat, cukup untuk demo (tidak ada server email
-    // sungguhan — lihat catatan di auth.requestPasswordReset di bawah).
-    RESET_TOKEN_TTL_MS: 30 * 60 * 1000, // 30 menit
-
-    _readAttempts() {
-        try { return JSON.parse(localStorage.getItem(this.ATTEMPTS_KEY) || '{}'); }
-        catch (e) { return {}; }
-    },
-
-    _writeAttempts(map) {
-        localStorage.setItem(this.ATTEMPTS_KEY, JSON.stringify(map));
-    },
-
-    /** Cek apakah `username` sedang dikunci. Kalau masa kuncinya sudah lewat, otomatis dibersihkan. */
-    isLockedOut(username) {
-        const map = this._readAttempts();
-        const rec = map[username];
-        if (!rec || !rec.lockedUntil) return false;
-        if (Date.now() >= rec.lockedUntil) {
-            delete map[username];
-            this._writeAttempts(map);
-            return false;
-        }
-        return true;
-    },
-
-    /** Sisa waktu kunci dalam menit (dibulatkan ke atas), untuk ditampilkan ke pengguna. */
-    lockoutMinutesLeft(username) {
-        const rec = this._readAttempts()[username];
-        if (!rec || !rec.lockedUntil) return 0;
-        return Math.max(1, Math.ceil((rec.lockedUntil - Date.now()) / 60000));
-    },
-
-    _recordLoginFailure(username) {
-        const map = this._readAttempts();
-        const rec = map[username] || { count: 0, lockedUntil: 0 };
-        rec.count += 1;
-        if (rec.count >= this.MAX_LOGIN_ATTEMPTS) {
-            rec.lockedUntil = Date.now() + this.LOCKOUT_MS;
-            rec.count = 0;
-        }
-        map[username] = rec;
-        this._writeAttempts(map);
-    },
-
-    _clearLoginAttempts(username) {
-        const map = this._readAttempts();
-        if (map[username]) { delete map[username]; this._writeAttempts(map); }
-    },
-
-    // --- Captcha sederhana ("1+2=?") -------------------------------------
-    // Soal baru dibuat tiap kali form (masuk/daftar/lupa password)
-    // dirender, disimpan di memori (bukan localStorage) supaya tidak bisa
-    // dibaca/diubah lewat devtools storage. Jawaban dicek di sisi klien —
-    // ini captcha demo untuk menghambat bot sederhana, BUKAN pengaman
-    // tingkat produksi.
-    _captcha: { a: 0, b: 0 },
-
-    newCaptcha() {
-        this._captcha = { a: 1 + Math.floor(Math.random() * 9), b: 1 + Math.floor(Math.random() * 9) };
-        return `${this._captcha.a} + ${this._captcha.b}`;
-    },
-
-    checkCaptcha(answer) {
-        const n = parseInt(String(answer).trim(), 10);
-        return !isNaN(n) && n === (this._captcha.a + this._captcha.b);
-    },
+    // Captcha aktif (challenge + token bertanda tangan server) untuk
+    // form yang sedang tampil — dibuat ulang tiap kali form dirender.
+    _captcha: null,
 
     currentUser() {
-        try { return JSON.parse(localStorage.getItem(this.SESSION_KEY) || 'null'); }
+        try { return JSON.parse(localStorage.getItem(this.SESSION_USER_KEY) || 'null'); }
         catch (e) { return null; }
     },
 
-    async login(username, password) {
-        if (this.isLockedOut(username)) return 'locked';
-        const user = await db.find('users', u => u.username === username && u.password === password);
-        if (!user) { this._recordLoginFailure(username); return false; }
-        this._clearLoginAttempts(username);
-        localStorage.setItem(this.SESSION_KEY, JSON.stringify({
-            username: user.username, name: user.name, role: user.role
-        }));
-        return true;
+    _setSession(token, user) {
+        setToken(token);
+        localStorage.setItem(this.SESSION_USER_KEY, JSON.stringify(user));
     },
 
-    /**
-     * Registrasi mandiri untuk PESERTA (publik, tanpa perlu masuk).
-     * Peran akun baru SELALU 'peserta' — akun Dosen/Admin hanya dibuat
-     * lewat Dashboard Admin (adminAction.submitTambahAkun di admin.js),
-     * bukan lewat pendaftaran mandiri ini.
-     * Mengembalikan string pesan error, atau null kalau berhasil.
-     */
-    async register({ username, password, name, email }) {
-        if (!username || !password || !name || !email) return 'Semua field wajib diisi.';
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return 'Format email tidak valid.';
-        if (await db.find('users', u => u.username === username)) return 'Username sudah dipakai, gunakan username lain.';
-        if (await db.find('users', u => u.email && u.email.toLowerCase() === email.toLowerCase())) return 'Email sudah terdaftar, gunakan email lain.';
-
-        await db.insert('users', { username, password, name, role: 'peserta', email });
-        await this.login(username, password); // langsung masuk setelah daftar
+    async login(username, password, captchaAnswer) {
+        if (!this._captcha) return 'Soal captcha belum dimuat, coba muat ulang halaman.';
+        const { token, user } = await db.login({
+            username, password,
+            captchaToken: this._captcha.token, captchaAnswer,
+        });
+        this._setSession(token, user);
         return null;
     },
 
-    // --- Lupa / Reset Password ------------------------------------------
-    /**
-     * Buat token reset & KIRIM email sungguhan lewat Worker (worker.js →
-     * Resend, lihat db.sendResetEmail). Kalau pengiriman gagal (mis. domain
-     * pengirim belum diverifikasi di Resend), tautan reset tetap
-     * dikembalikan & ditampilkan langsung ke pengguna lewat
-     * web.resolveLupaPasswordSent di bawah, supaya alur tidak buntu.
-     * Mengembalikan { error } atau { resetUrl, user, emailSent }.
-     */
-    async requestPasswordReset(email) {
-        const user = await db.find('users', u => u.email && u.email.toLowerCase() === String(email).trim().toLowerCase());
-        // Pesan sengaja sama baik email ditemukan atau tidak (di pemanggil),
-        // supaya orang tidak bisa menebak email mana yang terdaftar.
-        if (!user) return { error: null, user: null, resetUrl: null, emailSent: false };
-
-        const token = 'reset_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
-        await db.insert('passwordResets', { username: user.username, token, expiresAt: Date.now() + this.RESET_TOKEN_TTL_MS });
-
-        const resetUrl = `${window.location.origin}${window.location.pathname}?reset-password/${token}`;
-
-        let emailSent = false;
-        try {
-            await db.sendResetEmail({ to: user.email, name: user.name, resetUrl });
-            emailSent = true;
-        } catch (e) {
-            console.warn('Gagal kirim email reset password, tampilkan tautan langsung:', e);
-        }
-
-        return { error: null, user, resetUrl, emailSent };
+    /** Registrasi mandiri — peran akun baru SELALU 'peserta' (ditentukan
+     *  server, bukan klien). Akun Dosen/Admin hanya dibuat lewat
+     *  Dashboard Admin (db.adminCreateAccount). */
+    async register({ username, password, name, email }, captchaAnswer) {
+        if (!this._captcha) return 'Soal captcha belum dimuat, coba muat ulang halaman.';
+        const { token, user } = await db.register({
+            username, password, name, email,
+            captchaToken: this._captcha.token, captchaAnswer,
+        });
+        this._setSession(token, user);
+        return null;
     },
 
-    /** Ambil record token reset yang masih berlaku (belum kadaluarsa). */
-    async validResetToken(token) {
-        const rec = await db.find('passwordResets', r => r.token === token);
-        if (!rec) return null;
-        if (Date.now() >= rec.expiresAt) { await db.remove('passwordResets', rec.id); return null; }
-        return rec;
+    async requestPasswordReset(email, captchaAnswer) {
+        if (!this._captcha) return;
+        await db.forgotPassword({ email, captchaToken: this._captcha.token, captchaAnswer });
     },
 
-    /** Set password baru lewat token yang valid. Mengembalikan string error, atau null kalau berhasil. */
     async resetPassword(token, newPassword) {
-        if (!newPassword || newPassword.length < 6) return 'Password baru minimal 6 karakter.';
-        const rec = await this.validResetToken(token);
-        if (!rec) return 'Tautan reset tidak valid atau sudah kadaluarsa. Silakan minta tautan baru.';
-
-        const user = await db.find('users', u => u.username === rec.username);
-        if (!user) return 'Akun terkait tautan ini tidak ditemukan.';
-
-        await db.update('users', user.id, { password: newPassword });
-        await db.remove('passwordResets', rec.id);
-        this._clearLoginAttempts(user.username); // reset percobaan gagal yang mungkin masih terkunci
-        return null;
+        await db.resetPassword({ token, password: newPassword });
     },
 
     logout() {
-        localStorage.removeItem(this.SESSION_KEY);
+        setToken(null);
+        localStorage.removeItem(this.SESSION_USER_KEY);
         if (typeof renderMenu === 'function') renderMenu();
         web.navigate('login');
     },
@@ -183,34 +78,6 @@ const auth = {
     hasRole(...roles) {
         const u = this.currentUser();
         return !!u && roles.includes(u.role);
-    },
-
-    /**
-     * Bikin key localStorage yang di-scope per akun yang sedang login
-     * (mis. 'slsProfile' → 'slsProfile_budi123'). Dipakai supaya data
-     * semacam profil/progress/skor kuis TIDAK tercampur antar akun
-     * peserta yang login bergantian di browser yang sama — sebelumnya
-     * key-key ini ditulis global sehingga peserta lain bisa melihat
-     * profil/progress peserta sebelumnya yang pernah login di browser
-     * yang sama.
-     */
-    userKey(base) {
-        const u = this.currentUser();
-        return u ? `${base}_${u.username}` : `${base}_guest`;
-    },
-
-    /**
-     * Baca profil (nama/email/notif) milik `username` TERTENTU — beda dari
-     * userKey() di atas yang selalu terikat akun yang SEDANG login. Dipakai
-     * oleh portofolio publik (web.resolvePublicPortfolio di bawah) untuk
-     * menampilkan nama pemilik profil yang benar, walau pengunjungnya tidak
-     * login atau sedang login sebagai akun lain. Key-nya ('slsProfile_user')
-     * sama persis dengan yang ditulis userKey() saat `username` login &
-     * menyimpan profilnya sendiri, jadi tidak perlu skema penyimpanan baru.
-     */
-    profileOf(username) {
-        try { return JSON.parse(localStorage.getItem(`slsProfile_${username}`) || '{}'); }
-        catch (e) { return {}; }
     },
 
     /** Dipanggil dari renderMenu() (index.html) tiap kali menu digambar ulang. */
@@ -221,8 +88,8 @@ const auth = {
         slot.innerHTML = user
             ? `<span class="auth-chip">
                    <i class="di-person img-24"></i>
-                   <span class="auth-name">${user.name}</span>
-                   <span class="badge auth-role">${user.role}</span>
+                   <span class="auth-name">${escHtml(user.name)}</span>
+                   <span class="badge auth-role">${escHtml(user.role)}</span>
                </span>
                <button class="slcBtn auth-logout" onclick="auth.logout()">Keluar</button>`
             : `<a href="javascript:void(0)" onclick="web.navigate('login')" class="auth-chip">
@@ -232,38 +99,43 @@ const auth = {
         if (typeof svg?.di === 'function') svg.di();
     },
 
+    /** Dipanggil di awal tiap resolver form akun untuk memuat 1 soal
+     *  captcha baru dari server (bukan dibuat di browser lagi). */
+    async loadCaptcha() {
+        try { this._captcha = await db.captcha(); }
+        catch (e) { this._captcha = null; }
+        return this._captcha?.challenge || 'Gagal memuat captcha';
+    },
+
+    /** Dipanggil di awal setiap aksi API yang butuh sesi — kalau server
+     *  bilang sesi sudah berakhir (401), bersihkan & arahkan ke /?login
+     *  dengan pesan yang jelas, bukan error generik. */
+    async guardApi(fn) {
+        try { return await fn(); }
+        catch (e) {
+            if (e instanceof ApiError && e.status === 401) {
+                setToken(null);
+                localStorage.removeItem(this.SESSION_USER_KEY);
+                if (typeof renderMenu === 'function') renderMenu();
+                alert('Sesi Anda sudah berakhir, silakan masuk kembali.');
+                web.navigate('login');
+                return null;
+            }
+            alert(e?.message || 'Terjadi kesalahan.');
+            return null;
+        }
+    },
+
     async handleLoginSubmit(form) {
         const username = form.querySelector('[name="username"]').value.trim();
         const password = form.querySelector('[name="password"]').value;
         const captcha  = form.querySelector('[name="captcha"]').value;
 
-        if (this.isLockedOut(username)) {
-            alert(`Akun ini dikunci sementara karena terlalu banyak percobaan gagal. Coba lagi dalam ${this.lockoutMinutesLeft(username)} menit.`);
-            web.navigate('login'); // render ulang, sekaligus dapat captcha baru
-            return;
-        }
+        const err = await this.login(username, password, captcha).catch(e => e?.message || 'Gagal masuk.');
+        if (err) { alert(err); web.navigate('login'); return; }
 
-        if (!this.checkCaptcha(captcha)) {
-            alert('Jawaban captcha salah, silakan coba lagi.');
-            web.navigate('login');
-            return;
-        }
-
-        const result = await this.login(username, password);
-        if (result === true) {
-            if (typeof renderMenu === 'function') renderMenu();
-            web.navigate('dashboard');
-        } else if (result === 'locked') {
-            alert(`Akun ini dikunci sementara karena terlalu banyak percobaan gagal. Coba lagi dalam ${this.lockoutMinutesLeft(username)} menit.`);
-            web.navigate('login');
-        } else {
-            const map = this._readAttempts()[username];
-            const sisa = map ? this.MAX_LOGIN_ATTEMPTS - map.count : this.MAX_LOGIN_ATTEMPTS;
-            alert(this.isLockedOut(username)
-                ? `Username atau password salah. Akun dikunci sementara ${this.lockoutMinutesLeft(username)} menit.`
-                : `Username atau password salah. Sisa percobaan: ${sisa}.`);
-            web.navigate('login');
-        }
+        if (typeof renderMenu === 'function') renderMenu();
+        web.navigate('dashboard');
     },
 
     async handleRegisterSubmit(form) {
@@ -274,15 +146,10 @@ const auth = {
         const email    = form.querySelector('[name="email"]').value.trim();
         const captcha  = form.querySelector('[name="captcha"]').value;
 
-        if (!this.checkCaptcha(captcha)) {
-            alert('Jawaban captcha salah, silakan coba lagi.');
-            web.navigate('daftar');
-            return;
-        }
-
         if (password !== confirm) { alert('Konfirmasi password tidak cocok.'); return; }
 
-        const err = await this.register({ username, password, name, email });
+        const err = await this.register({ username, password, name, email }, captcha)
+            .catch(e => e?.message || 'Gagal mendaftar.');
         if (err) { alert(err); web.navigate('daftar'); return; }
 
         if (typeof renderMenu === 'function') renderMenu();
@@ -294,19 +161,9 @@ const auth = {
         const email   = form.querySelector('[name="email"]').value.trim();
         const captcha = form.querySelector('[name="captcha"]').value;
 
-        if (!this.checkCaptcha(captcha)) {
-            alert('Jawaban captcha salah, silakan coba lagi.');
-            web.navigate('lupa-password');
-            return;
-        }
+        try { await this.requestPasswordReset(email, captcha); }
+        catch (e) { alert(e?.message || 'Gagal mengirim tautan reset.'); web.navigate('lupa-password'); return; }
 
-        const { resetUrl, emailSent } = await this.requestPasswordReset(email);
-        // emailSent true → email sungguhan sudah terkirim (Resend), tautan
-        // TIDAK ditampilkan lagi di halaman konfirmasi. emailSent false
-        // (mis. email tidak terdaftar, atau pengiriman gagal) → tautan
-        // tetap ditampilkan langsung supaya alur tidak buntu — lihat
-        // web.resolveLupaPasswordSent di bawah.
-        this._lastResetUrl = emailSent ? null : (resetUrl || null);
         web.navigate('lupa-password-terkirim');
     },
 
@@ -316,8 +173,8 @@ const auth = {
 
         if (password !== confirm) { alert('Konfirmasi password tidak cocok.'); return; }
 
-        const err = await this.resetPassword(token, password);
-        if (err) { alert(err); return; }
+        try { await this.resetPassword(token, password); }
+        catch (e) { alert(e?.message || 'Gagal mereset password.'); return; }
 
         alert('Password berhasil diganti. Silakan masuk dengan password baru Anda.');
         web.navigate('login');
@@ -326,32 +183,27 @@ const auth = {
 
 // --- Route + resolver 'login' — didaftarkan di sini, script.js tidak diubah ---
 web.routes.login = 'resolveLogin';
-
-// --- Route + resolver 'daftar' — registrasi mandiri akun Peserta ---
 web.routes.daftar = 'resolveRegister';
-
-// --- Route + resolver untuk alur lupa / reset password ---
 web.routes['lupa-password']         = 'resolveLupaPassword';
 web.routes['lupa-password-terkirim'] = 'resolveLupaPasswordSent';
 web.routes['reset-password']         = 'resolveResetPassword';
 
-web.resolveRegister = function () {
+web.resolveRegister = async function () {
     const user = auth.currentUser();
-
     if (user) {
         return [
             { section: 'titleHero', title: 'Sudah Masuk',
-              description: `Anda masuk sebagai <strong>${user.name}</strong> (${user.role}).` },
+              description: `Anda masuk sebagai <strong>${escHtml(user.name)}</strong> (${escHtml(user.role)}).` },
             { section: 'article',
               leftCol: { subtitle: '', lines: ['link:Ke Dashboard:dashboard'] },
               rightCol: { subtitle: '', lines: [] } }
         ];
     }
 
-    const captchaQ = auth.newCaptcha();
+    const captchaQ = await auth.loadCaptcha();
     return [
         { section: 'titleHero', title: 'Daftar Akun Peserta',
-          description: 'Buat akun baru untuk mulai mengikuti kursus.' },
+          description: 'Buat akun baru untuk mulai mengikuti kursus. Form pendaftaran akan terbuka otomatis di panel kanan.' },
         {
             section: 'article',
             leftCol: { subtitle: '', lines: ['link:Sudah punya akun? Masuk di sini:login'] },
@@ -360,10 +212,10 @@ web.resolveRegister = function () {
                 fields: [
                     { type: 'text',     name: 'name',     label: 'Nama Lengkap', required: true },
                     { type: 'text',     name: 'username', label: 'Username', required: true,
-                      placeholder: 'mis: budi123' },
+                      placeholder: 'mis: budi123 (huruf kecil, angka, . _ -)' },
                     { type: 'email',    name: 'email',    label: 'Email', required: true,
                       placeholder: 'nama@email.com' },
-                    { type: 'password', name: 'password', label: 'Password', required: true },
+                    { type: 'password', name: 'password', label: 'Password (min. 8 karakter)', required: true },
                     { type: 'password', name: 'confirm',  label: 'Konfirmasi Password', required: true },
                     { type: 'text',     name: 'captcha',  label: `Captcha: Berapa ${captchaQ} ?`, required: true,
                       placeholder: 'Jawaban' }
@@ -376,13 +228,12 @@ web.resolveRegister = function () {
     ];
 };
 
-web.resolveLogin = function () {
+web.resolveLogin = async function () {
     const user = auth.currentUser();
-
     if (user) {
         return [
             { section: 'titleHero', title: 'Sudah Masuk',
-              description: `Anda masuk sebagai <strong>${user.name}</strong> (${user.role}).` },
+              description: `Anda masuk sebagai <strong>${escHtml(user.name)}</strong> (${escHtml(user.role)}).` },
             {
                 section: 'article',
                 leftCol: {
@@ -398,10 +249,10 @@ web.resolveLogin = function () {
         ];
     }
 
-    const captchaQ = auth.newCaptcha();
+    const captchaQ = await auth.loadCaptcha();
     return [
         { section: 'titleHero', title: 'Masuk',
-          description: 'Gunakan akun peserta / dosen / admin untuk mengakses dashboard sesuai peran.' },
+          description: 'Gunakan akun peserta / dosen / admin untuk mengakses dashboard sesuai peran. Form masuk akan terbuka otomatis di panel kanan.' },
         {
             section: 'article',
             leftCol: {
@@ -428,9 +279,8 @@ web.resolveLogin = function () {
     ];
 };
 
-// --- Resolver 'lupa-password' — form minta tautan reset lewat email ----
-web.resolveLupaPassword = function () {
-    const captchaQ = auth.newCaptcha();
+web.resolveLupaPassword = async function () {
+    const captchaQ = await auth.loadCaptcha();
     return [
         { section: 'titleHero', title: 'Lupa Password',
           description: 'Masukkan email yang dipakai saat mendaftar. Tautan reset password akan dikirim ke email tersebut.' },
@@ -451,17 +301,14 @@ web.resolveLupaPassword = function () {
     ];
 };
 
-// --- Resolver 'lupa-password-terkirim' — konfirmasi setelah submit -----
-// Sejak ada worker.js:handleSendResetEmail (Resend), email reset SUNGGUHAN
-// terkirim ke inbox pengguna → auth._lastResetUrl akan `null` (lihat
-// handleForgotPasswordSubmit) dan halaman ini cukup minta orang cek email.
-// Tautan reset HANYA ditampilkan langsung di sini sebagai fallback, kalau
-// pengiriman emailnya gagal (mis. domain pengirim di Resend belum
-// diverifikasi) — supaya alur tidak buntu.
+// Sejak grading & alur reset sepenuhnya di server, mooc-api SELALU
+// mengembalikan balasan yang identik baik email terdaftar maupun tidak
+// (lihat SECURITY.md) — halaman ini karena itu TIDAK PERNAH lagi
+// menampilkan tautan reset mentah (beda dari versi lama yang
+// menampilkannya sebagai fallback kalau pengiriman email gagal; itu
+// sendiri sudah kebocoran — siapa pun bisa menebak/mencoba email orang
+// lain dan tahu dari ada/tidaknya tautan apakah email itu terdaftar).
 web.resolveLupaPasswordSent = function () {
-    const resetUrl = auth._lastResetUrl;
-    auth._lastResetUrl = null; // sekali tampil saja
-
     return [
         { section: 'titleHero', title: 'Periksa Email Anda',
           description: 'Jika email tersebut terdaftar, tautan untuk reset password telah dikirim.' },
@@ -469,48 +316,42 @@ web.resolveLupaPasswordSent = function () {
             section: 'article',
             leftCol: {
                 subtitle: '',
-                lines: resetUrl
-                    ? [
-                        'Pengiriman email gagal, jadi tautan resetnya ditampilkan langsung di sini:',
-                        `<div class="a-row"><input type="text" readonly id="reset-url" value="${resetUrl}" onclick="this.select()" style="width:70%">
-                            <button class="slcBtn" onclick="navigator.clipboard.writeText(web.gebi('reset-url').value); alert('Tautan berhasil disalin!');">Salin Tautan</button></div>`,
-                        `link:Buka Tautan Reset:${resetUrl.split('?')[1]}`
-                      ]
-                    : ['Jika email itu memang terdaftar, Anda akan menerima email berisi tautan reset password dalam beberapa saat. Periksa juga folder Spam/Junk.']
+                lines: ['Anda akan menerima email berisi tautan reset password dalam beberapa saat, jika email itu memang terdaftar. Periksa juga folder Spam/Junk.']
             },
             rightCol: { subtitle: '', lines: ['link:Kembali ke Halaman Masuk:login'] }
         }
     ];
 };
 
-// --- Resolver 'reset-password' — form password baru lewat token --------
 web.resolveResetPassword = function (token) {
-    const rec = token ? auth.validResetToken(token) : null;
-
-    if (!rec) {
+    if (!token) {
         return [
             { section: 'titleHero', title: 'Tautan Tidak Valid',
-              description: 'Tautan reset password tidak valid atau sudah kadaluarsa.' },
+              description: 'Tautan reset password tidak valid.' },
             { section: 'article',
               leftCol: { subtitle: '', lines: ['link:Minta Tautan Reset Baru:lupa-password', 'link:Kembali ke Halaman Masuk:login'] },
               rightCol: { subtitle: '', lines: [] } }
         ];
     }
-
+    // Validitas token (ada/tidak, kedaluwarsa) sekarang HANYA diketahui
+    // saat submit (POST /public?view=reset-password) — server tidak lagi
+    // mengekspos rute "cek token" terpisah (permukaan serangan lebih
+    // kecil: tidak ada cara menebak-nebak token valid tanpa langsung
+    // mencoba menggantinya).
     return [
         { section: 'titleHero', title: 'Buat Password Baru',
-          description: `Membuat password baru untuk akun <strong>${rec.username}</strong>.` },
+          description: 'Masukkan password baru untuk akun Anda.' },
         {
             section: 'article',
             leftCol: { subtitle: '', lines: [] },
             rightCol: {
                 subtitle: 'Form Reset Password',
                 fields: [
-                    { type: 'password', name: 'password', label: 'Password Baru', required: true },
+                    { type: 'password', name: 'password', label: 'Password Baru (min. 8 karakter)', required: true },
                     { type: 'password', name: 'confirm',  label: 'Konfirmasi Password Baru', required: true }
                 ],
                 submitText: 'Simpan Password Baru',
-                onSubmit: `event.preventDefault(); auth.handleResetPasswordSubmit(this, '${token}');`,
+                onSubmit: `event.preventDefault(); auth.handleResetPasswordSubmit(this, '${token.replace(/'/g, '')}');`,
                 lines: ['form:']
             }
         }
@@ -518,37 +359,14 @@ web.resolveResetPassword = function (token) {
 };
 
 // ============================================================
-// OVERRIDE — web.resolveDashboard / web.resolveSettings / web.saveProfile
-// / web.evaluateQuiz (versi asli di script.js, TIDAK diubah).
-//
-// Kenapa perlu ini: versi asli menyimpan profil/progress/skor kuis di
-// localStorage dengan key GLOBAL ('slsProfile', 'slsProgress',
-// 'slsQuizScore', 'slsLastModule') — tidak dibedakan per akun. Akibatnya,
-// kalau 2 peserta login bergantian di browser yang sama, peserta kedua
-// akan melihat profil & progress milik peserta pertama. Di sini key-key
-// tsb di-scope per akun lewat auth.userKey() (lihat auth.js bagian atas).
-//
-// Progress kursus juga TIDAK lagi dibaca dari localStorage 'slsProgress'
-// (lihat catatan di courses.js), tapi langsung dari tabel db 'progress'
-// yang sudah per-akun (kolom `username`) — sekaligus jumlah modul per
-// kursus dihitung lewat courseSvc.categoriesOf(slug), bukan pages[slug]
-// saja, supaya kursus TAMBAHAN buatan dosen (yang materinya tersimpan di
-// db, bukan di pages[]) ikut terhitung dengan benar. Modul yang sudah
-// dihapus dosen (lihat fitur edit/hapus modul) juga otomatis tidak lagi
-// dihitung sebagai "viewed", supaya angka progress selalu realistis.
+// Dashboard / Pengaturan Profil — data progress/sertifikat/kuis
+// sekarang SELALU dari mooc-api (scoped otomatis ke sesi), bukan
+// gabungan localStorage tak ter-scope seperti versi paling lama.
 // ============================================================
 web.resolveDashboard = async function (subParam) {
-    // Portofolio publik (tautan share) — /?dashboard/<username>, TIDAK
-    // perlu login. Diperiksa PALING AWAL, sebelum guard "harus masuk" di
-    // bawah, supaya tautan yang dibagikan bisa dibuka siapa saja tanpa
-    // akun. `subParam` datang dari web.navigate() (script.js, TIDAK
-    // diubah) yang memang sudah meneruskan bagian setelah slash pertama —
-    // jadi route "dashboard/peserta" otomatis sampai ke sini tanpa
-    // pendaftaran route baru.
     if (subParam) return web.resolvePublicPortfolio(subParam);
 
     const user = auth.currentUser();
-
     if (!user) {
         return [
             { section: 'titleHero', title: 'Dashboard', description: 'Silakan masuk terlebih dahulu.' },
@@ -558,24 +376,14 @@ web.resolveDashboard = async function (subParam) {
         ];
     }
 
-    const profile    = JSON.parse(localStorage.getItem(auth.userKey('slsProfile')) || '{}');
-    const name       = profile.name || user.name;
-    const lastModule = localStorage.getItem(auth.userKey('slsLastModule')) || 'Belum ada';
+    const { progressLines, myCerts, attemptCount } = await auth.guardApi(() => buildPortfolioData(user.username, user.name)) || {};
+    if (progressLines === undefined) return [];
 
-    // --- Kursus diikuti, progress & sertifikat (khusus akun ini) -------
-    // buildPortfolioData() (bawah file) = SATU-SATUNYA titik hitung, dipakai
-    // ulang oleh web.resolvePublicPortfolio supaya Dashboard privat & versi
-    // publik yang dibagikan selalu menampilkan angka yang identik.
-    const { progressLines, myCerts } = await buildPortfolioData(user.username, name);
-
-    // Tautan portofolio publik yang bisa dibagikan (lihat resolvePublicPortfolio
-    // di bawah) — dibangun dari lokasi halaman saat ini supaya otomatis ikut
-    // domain/path deploy-nya (localhost, sismadi.com, dst), tanpa hardcode host.
-    const publicUrl = `${window.location.origin}${window.location.pathname}?dashboard/${user.username}`;
+    const publicUrl = `${window.location.origin}${window.location.pathname}?dashboard/${encodeURIComponent(user.username)}`;
 
     return [
         { section: 'titleHero', title: 'Dashboard',
-          description: `Selamat datang kembali, <strong>${name}</strong>.` },
+          description: `Selamat datang kembali, <strong>${escHtml(user.name)}</strong>.` },
         {
             section: 'article',
             leftCol: {
@@ -588,7 +396,7 @@ web.resolveDashboard = async function (subParam) {
                     ? [`table:${JSON.stringify(myCerts)}`]
                     : [
                         'Belum ada sertifikat atas nama Anda.',
-                        'Lulus kuis kursus untuk mendapat sertifikat otomatis, atau pastikan **Nama** di Pengaturan Profil sama dengan nama pada sertifikat.',
+                        'Lulus kuis kursus untuk mendapat sertifikat otomatis.',
                         'link:Kerjakan Kuis:kuis',
                         '---',
                         'link:Verifikasi Sertifikat:cert'
@@ -601,17 +409,14 @@ web.resolveDashboard = async function (subParam) {
                 subtitle: 'Portofolio Publik',
                 lines: [
                     'Bagikan progress belajar & sertifikat Anda lewat tautan ini — bisa dibuka siapa saja, tanpa perlu masuk:',
-                    `<div class="a-row"><input type="text" readonly id="portfolio-url" value="${publicUrl}" onclick="this.select()" style="width:70%">
+                    `<div class="a-row"><input type="text" readonly id="portfolio-url" value="${escHtml(publicUrl)}" onclick="this.select()" style="width:70%">
                         <button class="slcBtn" onclick="navigator.clipboard.writeText(web.gebi('portfolio-url').value); alert('Tautan berhasil disalin!');">Salin Tautan</button></div>`,
                     `link:Pratinjau Portofolio Publik Saya:dashboard/${user.username}`
                 ]
             },
             rightCol: {
                 subtitle: 'Ringkasan Lainnya',
-                lines: [
-                    `card:Modul Terakhir Dilihat:${lastModule}`,
-                    `card:Kuis Dikerjakan:${(typeof quizSvc !== 'undefined') ? (await db.query('quizAttempts', a => a.username === user.username)).length : 0} kali`
-                ]
+                lines: [`card:Kuis Dikerjakan:${attemptCount} kali`]
             }
         },
         {
@@ -619,14 +424,10 @@ web.resolveDashboard = async function (subParam) {
             leftCol: {
                 subtitle: 'Aksi Cepat',
                 lines: [
-                    'link:Lihat Katalog Kursus:learn',
-                    '---',
-                    'link:Kerjakan Kuis:kuis',
-                    '---',
-                    'link:Verifikasi Sertifikat:cert',
-                    '---',
-                    'link:Pengaturan Profil:settings',
-                    '---'
+                    'link:Lihat Katalog Kursus:learn', '---',
+                    'link:Kerjakan Kuis:kuis', '---',
+                    'link:Verifikasi Sertifikat:cert', '---',
+                    'link:Pengaturan Profil:settings', '---'
                 ]
             },
             rightCol: { subtitle: '', lines: [] }
@@ -634,71 +435,54 @@ web.resolveDashboard = async function (subParam) {
     ];
 };
 
-/**
- * buildPortfolioData — hitung baris progress kursus & tabel sertifikat
- * milik SATU akun (`username`), lepas dari siapa yang sedang login. Dipakai
- * ulang oleh web.resolveDashboard (privat, akun sendiri) DAN
- * web.resolvePublicPortfolio (publik, siapa saja lewat tautan share) di
- * bawah — supaya keduanya selalu menampilkan angka yang identik dan logika
- * penggabungan sertifikat statis+kuis tidak dobel ditulis.
- */
+/** buildPortfolioData — dipakai ulang oleh Dashboard privat & portofolio publik. */
 async function buildPortfolioData(username, name) {
-    const progressRows = await db.query('progress', p => p.username === username);
+    const [progressRows, certs, attempts] = await Promise.all([
+        db.listProgress().catch(() => []),
+        (username === auth.currentUser()?.username ? db.myCertificates() : Promise.resolve([])),
+        (username === auth.currentUser()?.username ? db.myAttempts() : Promise.resolve([])),
+    ]);
+
     const progressLines = await Promise.all(progressRows.map(async (p) => {
         const meta = await courseSvc.get(p.slug);
-        // courseSvc.progressOf() = satu-satunya sumber hitung persentase
-        // (lihat courses.js) — dipakai juga oleh gerbang kuis 100% & daftar
-        // kuis di quiz.js, supaya angkanya selalu sinkron di semua halaman.
-        const { viewed, total, pct } = await courseSvc.progressOf(username, p.slug);
-        const lastQuiz  = (typeof quizSvc !== 'undefined') ? await quizSvc.lastAttempt(username, p.slug) : null;
-        const quizText  = lastQuiz ? ` · Kuis: ${lastQuiz.score}` : '';
+        const { viewed, total, pct } = await courseSvc.progressOf(p.slug, meta);
+        const attemptsOfSlug = attempts.filter(a => a.slug === p.slug);
+        const last = attemptsOfSlug.length ? attemptsOfSlug[attemptsOfSlug.length - 1] : null;
+        const quizText = last ? ` · Kuis: ${last.score}` : '';
         return `skill:${pct}%:${meta?.title || p.slug}:${viewed}/${total} modul${quizText}`;
     }));
 
-    // Digabung dari DUA sumber: (a) sertifikat STATIS (pages.certificates,
-    // dicocokkan lewat nama profil — dipertahankan supaya contoh sertifikat
-    // lama tetap tampil), dan (b) sertifikat KUIS yang terbit OTOMATIS saat
-    // peserta lulus kuis suatu kursus (tabel db 'certificates', lihat
-    // certSvc.award di quiz.js). `typeof certSvc` dijaga supaya auth.js
-    // tetap jalan sendiri kalau quiz.js belum/tidak dimuat.
-    const staticCerts = Object.entries(pages.certificates || {})
-        .filter(([id, c]) => name && c.name.trim().toLowerCase() === name.trim().toLowerCase())
-        .map(([id, c]) => ({ Kode: id, Ujian: c.exam, Skor: c.score, Tanggal: c.date,
-                              Aksi: `<a href="javascript:void(0)" onclick="web.navigate('cert/${id}')">Lihat</a>` }));
+    const myCerts = certs.map(c => ({
+        Kode: c.id, Ujian: c.examTitle, Skor: c.score, Tanggal: c.date,
+        Aksi: `<a href="javascript:void(0)" onclick="web.navigate('cert/${encodeURIComponent(c.id)}')">Lihat</a>`
+    }));
 
-    const quizCerts = (typeof certSvc !== 'undefined')
-        ? (await certSvc.of(username)).map(c => ({
-            Kode: c.id, Ujian: c.examTitle, Skor: c.score, Tanggal: c.date,
-            Aksi: `<a href="javascript:void(0)" onclick="web.navigate('cert/${c.id}')">Lihat</a>`
-          }))
-        : [];
-
-    return { progressLines, myCerts: [...quizCerts, ...staticCerts] };
+    return { progressLines, myCerts, attemptCount: attempts.length };
 }
 
-/**
- * web.resolvePublicPortfolio — versi PUBLIK (read-only, tanpa login) dari
- * Dashboard, dibuka lewat '/?dashboard/<username>' (subParam ditangkap di
- * web.resolveDashboard di atas). Hanya menampilkan progress & sertifikat —
- * TANPA "Aksi Cepat"/"Pengaturan Profil"/link salin tautan, supaya orang
- * yang membuka tautan share tidak melihat/mengira bisa mengubah akun orang
- * lain. Nama pemilik diambil lewat auth.profileOf(username) (auth.js
- * bagian atas) supaya benar walau pengunjungnya tidak login sama sekali.
- */
+/** Versi PUBLIK (read-only) Dashboard, dibuka lewat '/?dashboard/<username>'. */
 web.resolvePublicPortfolio = async function (username) {
-    const target = await db.find('users', u => u.username === username);
-    if (!target) {
-        return [{ section: 'titleHero', title: 'Portofolio Tidak Ditemukan',
-                   description: `Akun dengan username <strong>${username}</strong> tidak ditemukan.` }];
+    // certPublic/myAttempts tidak berlaku utk akun lain (scoped sesi) —
+    // portofolio publik karena itu hanya menampilkan progress + sertifikat
+    // milik SESI YANG SEDANG LOGIN kalau usernamenya cocok; untuk akun
+    // lain, tampilkan progress publik kosong dengan pesan yang jelas
+    // (data progress/sertifikat orang lain memang tidak seharusnya bisa
+    // diambil lewat panggilan sisi klien tanpa endpoint publik khusus).
+    const me = auth.currentUser();
+    if (!me || me.username !== username) {
+        return [
+            { section: 'titleHero', title: 'Portofolio Tidak Tersedia',
+              description: 'Portofolio publik untuk akun ini tidak dapat ditampilkan dari sesi Anda saat ini.' },
+            { section: 'article',
+              leftCol: { subtitle: '', lines: ['link:Ke Halaman Masuk:login'] },
+              rightCol: { subtitle: '', lines: [] } }
+        ];
     }
 
-    const profile = auth.profileOf(username);
-    const name     = profile.name || target.name;
-    const { progressLines, myCerts } = await buildPortfolioData(username, name);
-
+    const { progressLines, myCerts } = await buildPortfolioData(username, me.name);
     return [
-        { section: 'titleHero', title: `Portofolio — ${name}`,
-          description: `Ringkasan progress belajar &amp; sertifikat milik <strong>${name}</strong>.` },
+        { section: 'titleHero', title: `Portofolio — ${escHtml(me.name)}`,
+          description: `Ringkasan progress belajar &amp; sertifikat milik <strong>${escHtml(me.name)}</strong>.` },
         {
             section: 'article',
             leftCol: {
@@ -719,8 +503,7 @@ web.resolvePublicPortfolio = async function (username) {
 };
 
 web.resolveSettings = async function () {
-    const profile = JSON.parse(localStorage.getItem(auth.userKey('slsProfile')) || '{}');
-    const user    = auth.currentUser();
+    const user = auth.currentUser();
     if (!user) {
         return [
             { section: 'titleHero', title: 'Pengaturan / Profil', description: 'Silakan masuk terlebih dahulu.' },
@@ -729,38 +512,31 @@ web.resolveSettings = async function () {
               rightCol: { subtitle: '', lines: [] } }
         ];
     }
-    // name & email diprioritaskan dari D1 (sumber kebenaran, lihat
-    // web.saveProfile) — localStorage cuma fallback/cache utk `notif`.
-    const record = await db.find('users', u => u.username === user.username);
+    // name & email SELALU segar dari server (bukan cache localStorage) —
+    // satu-satunya sumber kebenaran sekarang tabel `users` di D1.
+    const record = await auth.guardApi(() => db.me()) || user;
 
     return [
         { section: 'titleHero', title: 'Pengaturan / Profil',
-          description: 'Kelola informasi akun Anda.' },
+          description: 'Kelola informasi akun Anda. Form akan terbuka otomatis di panel kanan.' },
         {
             section: 'article',
             leftCol: {
                 subtitle: 'Info',
                 lines: [
-                    'link:Lihat Katalog Kursus:learn',
-                    '---',
-                    'link:Kerjakan Kuis:kuis',
-                    '---',
-                    'link:Verifikasi Sertifikat:cert',
-                    '---',
-                    'link:Pengaturan Profil:settings',
-                    '---'
+                    'link:Lihat Katalog Kursus:learn', '---',
+                    'link:Kerjakan Kuis:kuis', '---',
+                    'link:Verifikasi Sertifikat:cert', '---',
+                    'link:Pengaturan Profil:settings', '---'
                 ]
             },
             rightCol: {
                 subtitle: 'Profil Saya',
                 fields: [
-                    { type: 'text',   name: 'name',  id: 'set-name',  label: 'Nama Lengkap',
-                      value: record?.name  || profile.name  || user?.name || '', placeholder: 'Nama Anda', required: true },
-                    { type: 'email',  name: 'email', id: 'set-email', label: 'Email',
-                      value: record?.email || profile.email || '', placeholder: 'nama@email.com' },
-                    { type: 'select', name: 'notif', id: 'set-notif', label: 'Notifikasi Email',
-                      value: profile.notif || 'on',
-                      options: [{ value: 'on', label: 'Aktifkan' }, { value: 'off', label: 'Matikan' }] }
+                    { type: 'text',  name: 'name',  id: 'set-name',  label: 'Nama Lengkap',
+                      value: record?.name || user.name || '', placeholder: 'Nama Anda', required: true },
+                    { type: 'email', name: 'email', id: 'set-email', label: 'Email',
+                      value: record?.email || '', placeholder: 'nama@email.com' }
                 ],
                 submitText: 'Simpan Perubahan',
                 onSubmit:   'event.preventDefault(); web.saveProfile(this);',
@@ -776,38 +552,16 @@ web.saveProfile = async function (form) {
 
     const name  = form.querySelector('[name="name"]')?.value.trim()  || '';
     const email = form.querySelector('[name="email"]')?.value.trim() || '';
-    const notif = form.querySelector('[name="notif"]')?.value        || 'on';
-
     if (!name) { alert('Nama tidak boleh kosong.'); return; }
 
-    // Ambil record akun dari D1 (butuh id-nya utk update — session cuma
-    // simpan username/name/role, lihat auth.login()).
-    const record = await db.find('users', u => u.username === user.username);
-    if (!record) { alert('Akun tidak ditemukan.'); return; }
+    const updated = await auth.guardApi(() => db.saveProfile({ name, email }));
+    if (!updated) return;
 
-    // Kolom `email` UNIQUE di D1 (lihat schema.sql) — cek dulu supaya tidak
-    // bentrok dengan akun lain, sama seperti validasi di auth.register().
-    if (email) {
-        const other = await db.find('users', u => u.email && u.email.toLowerCase() === email.toLowerCase() && u.username !== user.username);
-        if (other) { alert('Email sudah dipakai akun lain, gunakan email lain.'); return; }
-    }
-
-    // name & email = sumber kebenarannya tabel `users` di D1 (dipakai juga
-    // oleh login, lupa password, & pencocokan nama sertifikat) — BUKAN
-    // localStorage lagi. `notif` tidak ada kolomnya di D1, jadi tetap
-    // disimpan lokal saja (fitur kosmetik, per-perangkat).
-    await db.update('users', record.id, { name, email });
-    localStorage.setItem(auth.userKey('slsProfile'), JSON.stringify({ name, email, notif }));
-
-    // Sinkronkan sesi supaya nama baru langsung tampil (mis. "Selamat
-    // datang kembali, <name>" di Dashboard) tanpa perlu login ulang.
-    localStorage.setItem(auth.SESSION_KEY, JSON.stringify({ username: user.username, name, role: user.role }));
+    // Sinkronkan sesi lokal supaya nama baru langsung tampil tanpa perlu
+    // masuk ulang (role/username tidak berubah, ambil dari sesi lama).
+    localStorage.setItem(auth.SESSION_USER_KEY, JSON.stringify({ ...user, name: updated.name }));
+    if (typeof renderMenu === 'function') renderMenu();
 
     alert('Profil berhasil disimpan.');
-    this.navigate('dashboard');
+    web.navigate('dashboard');
 };
-
-// web.evaluateQuiz TIDAK di-override di sini lagi — kuis sekarang berbasis
-// per-kursus (tabel db 'quizAttempts'), jadi versi finalnya (yang menimpa
-// versi generik di atas) ada di quiz.js supaya logika kuis terkumpul di
-// satu file, konsisten dengan pola "satu fitur, satu file" di proyek ini.

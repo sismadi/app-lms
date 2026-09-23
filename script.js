@@ -1,3 +1,25 @@
+// ============================================================
+// [KEAMANAN] escHtml / safeUrl — mooc-app lama TIDAK PUNYA fungsi
+// escape HTML sama sekali (lihat mooc-app-fixed/SECURITY.md temuan
+// SEDANG 7): judul/deskripsi kursus, nama akun, dll disisipkan
+// langsung ke innerHTML lewat template string. Dosen/peserta bisa
+// mengisi field teks apa pun dengan payload HTML/JS dan itu
+// tereksekusi di sesi pengunjung lain (stored XSS). Dua fungsi ini
+// dipakai di SETIAP titik yang menyisipkan data pengguna ke HTML di
+// bawah — pola sama dengan cms-app (escHtml/safeUrl di engine.js).
+// ============================================================
+function escHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+}
+function safeUrl(value) {
+    const v = String(value || '').trim();
+    if (!v) return '';
+    if (/^(javascript|data|vbscript|file):/i.test(v)) return '';
+    return v;
+}
+
 function pagesToFileFormat(pagesObj) {
     return Object.entries(pagesObj)
         .map(([key, val]) => `pages.${key} = ${JSON.stringify(val, null, 4)};`)
@@ -91,14 +113,20 @@ const web = {
         const bodyEl  = this.gebi('modulDrawerBody');
         if (!overlay || !panel || !bodyEl) return;
 
+        // [KEAMANAN] cat.name/item.title bisa berasal dari materi tambahan
+        // yang diisi DOSEN (courseSvc.addMaterial) — di-escape. item.id
+        // dibentuk oleh server (genId, pola 'materi_...') jadi aman
+        // disisipkan ke onclick, tapi tetap dibersihkan dari kutip sebagai
+        // pertahanan berlapis.
         const categories = (pages[slug] && pages[slug].categories) || [];
         bodyEl.innerHTML = categories.map(cat => `
-            <div class="cat-box"><strong>${cat.name}</strong>
-            <ul>${cat.items.map(item => `
-                <li><a href="javascript:void(0)"
+            <div class="cat-box"><strong>${escHtml(cat.name)}</strong>
+            <ul>${(cat.items || []).map(item => {
+                const safeId = String(item.id).replace(/[^a-zA-Z0-9_-]/g, '');
+                return `<li><a href="javascript:void(0)"
                     class="${item.id === activeId ? 'active' : ''}"
-                    onclick="web.navigate('${slug}/${item.id}'); web.closeModulDrawer();">${item.title}</a></li>`
-            ).join('')}</ul></div>`).join('');
+                    onclick="web.navigate('${slug}/${safeId}'); web.closeModulDrawer();">${escHtml(item.title)}</a></li>`;
+            }).join('')}</ul></div>`).join('');
 
         overlay.classList.add('open');
         panel.classList.add('open');
@@ -172,6 +200,11 @@ const web = {
         const articleBlock = blocks.find(b => b.section === 'article');
 
         if (!articleBlock || !articleBlock.rightCol || !articleBlock.rightCol.fields) {
+            // opts.silent: dipakai oleh auto-open drawer (lihat
+            // AUTO_DRAWER_ROUTES di navigate() di bawah) — halaman yang
+            // TIDAK sedang menampilkan form (mis. "Anda sudah masuk") itu
+            // kondisi normal, bukan kegagalan yang perlu di-alert().
+            if (opts.silent) return;
             const heroDesc = blocks.find(b => b.section === 'titleHero')?.description || '';
             alert((heroTitle || 'Tidak dapat membuka form') +
                   (heroDesc ? '\n' + heroDesc.replace(/<[^>]+>/g, '') : ''));
@@ -180,6 +213,18 @@ const web = {
 
         this.openDrawer({ ...articleBlock.rightCol, title: opts.title || heroTitle || articleBlock.rightCol.subtitle });
     },
+
+    // ============================================================
+    // [DRAWER] Rute yang FORM-nya selalu dibuka otomatis lewat drawer
+    // kanan begitu halamannya dinavigasi — memenuhi permintaan "semua
+    // form ada dalam drawer" untuk alur akun (masuk/daftar/lupa-
+    // password/reset-password/pengaturan profil), konsisten dengan pola
+    // yang SUDAH ADA untuk form dosen/admin/kuis. Halaman di baliknya
+    // (leftCol: info akun demo, tautan, dst.) tetap tampil sebagai latar
+    // — dibangun lewat resolver YANG SAMA persis (auth.js), TIDAK ada
+    // duplikasi field antara halaman & drawer.
+    // ============================================================
+    AUTO_DRAWER_ROUTES: new Set(['login', 'daftar', 'lupa-password', 'reset-password', 'settings']),
 
     // [PATCH D1] async: beberapa resolver (resolveLearningModule,
     // resolveDosenDashboard, resolveKuisDashboard, resolveCertificate)
@@ -207,6 +252,13 @@ const web = {
         }
 
         await ui.render('content', pageData);
+
+        // [DRAWER] Buka otomatis kalau rute ini termasuk alur akun (lihat
+        // AUTO_DRAWER_ROUTES di atas) — `silent:true` supaya kondisi
+        // "form tidak ada karena sudah masuk" tidak memunculkan alert.
+        if (this.AUTO_DRAWER_ROUTES.has(targetSlug)) {
+            this.openFormFromPage(pageData, { silent: true });
+        }
 
         if (slug !== undefined) {
             window.history.pushState({ path: currentPath }, '', `?${currentPath}`);
@@ -532,10 +584,10 @@ const components = {
           'image:': (val) => {
                const [src, caption] = val.split('|').map(s => s.trim());
                const cap = caption
-                   ? `<figcaption style="font-size:12px;color:var(--sv-text-dim);margin-top:6px;text-align:center;">${caption}</figcaption>`
+                   ? `<figcaption style="font-size:12px;color:var(--sv-text-dim);margin-top:6px;text-align:center;">${escHtml(caption)}</figcaption>`
                    : '';
                return `<figure style="margin:16px 0;width:100%;">
-                   <img src="${src}" alt="${caption || ''}"
+                   <img src="${safeUrl(src)}" alt="${escHtml(caption || '')}"
                         style="width:100%;height:auto;border-radius:6px;display:block;border:1px solid var(--sv-border);"
                         loading="lazy" onerror="this.style.display='none'">
                    ${cap}
@@ -546,7 +598,8 @@ const components = {
            // Sintaks: pdf:https://url/dokumen.pdf
            // Opsional tinggi: pdf:https://url/dokumen.pdf|600
            'pdf:': (val) => {
-               const [src, height] = val.split('|').map(s => s.trim());
+               const [rawSrc, height] = val.split('|').map(s => s.trim());
+               const src = safeUrl(rawSrc);
                const h = parseInt(height) || 480;
                return `<div style="width:100%;margin:16px 0;">
                    <iframe src="${src}"
@@ -594,13 +647,14 @@ const components = {
                }
 
                // File video langsung (mp4, webm, ogg)
+               const safeSrc = safeUrl(src);
                const ext = src.split('.').pop().split('?')[0].toLowerCase();
                const mime = { mp4: 'video/mp4', webm: 'video/webm', ogg: 'video/ogg' }[ext] || 'video/mp4';
                return `<div style="width:100%;margin:16px 0;">
                    <video controls style="width:100%;height:auto;max-height:${h}px;border-radius:6px;display:block;border:1px solid var(--sv-border);background:#000;">
-                       <source src="${src}" type="${mime}">
+                       <source src="${safeSrc}" type="${mime}">
                        Browser tidak mendukung video HTML5.
-                       <a href="${src}" target="_blank" style="color:var(--aColor);">Unduh video &rarr;</a>
+                       <a href="${safeSrc}" target="_blank" style="color:var(--aColor);">Unduh video &rarr;</a>
                    </video>
                </div>`;
            },
@@ -624,22 +678,28 @@ const components = {
             },
             'link:': (val) => {
                 const parts = val.split(':');
-                return `<a href="javascript:void(0)" onclick="web.navigate('${parts.slice(1).join(':')}')" class="inline-link">${parts[0]} &raquo;</a>`;
+                const target = parts.slice(1).join(':').replace(/'/g, '');
+                return `<a href="javascript:void(0)" onclick="web.navigate('${target}')" class="inline-link">${escHtml(parts[0])} &raquo;</a>`;
             },
+            // [KEAMANAN] label/text/title/content di sini bisa berasal dari
+            // judul kursus atau nama modul buatan DOSEN (mis. baris
+            // 'skill:' di Dashboard — lihat auth.js buildPortfolioData) —
+            // di-escape supaya judul kursus tidak bisa menyuntik HTML ke
+            // Dashboard peserta lain yang melihatnya.
             'skill:': (val) => {
                 const [percent, label, text] = val.split(':');
                 return `<div class="skill-item">
-                    <div class="skill-info"><strong>${label}</strong> ${text || ''} <small>(${percent})</small></div>
-                    <div class="skill-track"><div class="skill-fill" style="width:${percent}"></div></div>
+                    <div class="skill-info"><strong>${escHtml(label)}</strong> ${escHtml(text || '')} <small>(${escHtml(percent)})</small></div>
+                    <div class="skill-track"><div class="skill-fill" style="width:${encodeURIComponent(percent)}"></div></div>
                 </div>`;
             },
             'step:': (val) => {
                 const [time, title, desc] = val.split(':');
-                return `<div class="tl-item"><div class="tl-year">${time}</div><div><strong>${title}</strong></div><div>${desc || ''}</div></div>`;
+                return `<div class="tl-item"><div class="tl-year">${escHtml(time)}</div><div><strong>${escHtml(title)}</strong></div><div>${escHtml(desc || '')}</div></div>`;
             },
             'card:': (val) => {
                 const [title, content] = val.split(':');
-                return `<div class="info-card"><strong>${title}</strong><p>${content}</p></div>`;
+                return `<div class="info-card"><strong>${escHtml(title)}</strong><p>${escHtml(content)}</p></div>`;
             },
             'table:': (val) => {
                 let dataTable = null;
@@ -719,10 +779,14 @@ const components = {
 
     genericForm: (ctx) => {
         const fields = (ctx.fields || []).map(f => {
-            const fid  = f.id   ? `id="${f.id}"` : '';
-            const fval = f.value !== undefined ? String(f.value) : '';
+            const fid  = f.id   ? `id="${escHtml(f.id)}"` : '';
+            // [KEAMANAN] fval/ph/label di-escape — sebelumnya disisipkan
+            // apa adanya ke atribut HTML (mis. value="${fval}"), jadi
+            // value pra-isi yang mengandung `">` bisa keluar dari atribut
+            // dan menyisipkan tag/atribut baru (mis. onload=...).
+            const fval = f.value !== undefined ? escHtml(String(f.value)) : '';
             const req  = f.required ? 'required' : '';
-            const ph   = f.placeholder ? `placeholder="${f.placeholder}"` : '';
+            const ph   = f.placeholder ? `placeholder="${escHtml(f.placeholder)}"` : '';
 
             // Hidden: tidak butuh label atau wrapper
             if (f.type === 'hidden')
@@ -731,17 +795,17 @@ const components = {
             const starMark = f.required
                 ? ' <span style="color:var(--orange,#f90)">*</span>' : '';
             const label = f.label
-                ? `<label class="a-label">${f.label}${starMark}</label>` : '';
+                ? `<label class="a-label">${escHtml(f.label)}${starMark}</label>` : '';
 
             let input;
-            const fname = f.name ? `name="${f.name}"` : '';
+            const fname = f.name ? `name="${escHtml(f.name)}"` : '';
 
             if (f.type === 'select') {
                 const opts = (f.options || []).map(o => {
                     const v   = typeof o === 'object' ? o.value : o;
                     const l   = typeof o === 'object' ? o.label  : o;
-                    const sel = fval == v ? 'selected' : '';
-                    return `<option value="${v}" ${sel}>${l}</option>`;
+                    const sel = fval == escHtml(String(v)) ? 'selected' : '';
+                    return `<option value="${escHtml(v)}" ${sel}>${escHtml(l)}</option>`;
                 }).join('');
                 input = `<select ${fid} ${fname} ${req}><option value="">— pilih —</option>${opts}</select>`;
             } else if (f.type === 'textarea') {
@@ -763,54 +827,44 @@ const components = {
         </form>`;
     },
 
-    quizEngine: (ctx) => {
-        const randomized = [...(ctx.questions || [])].sort(() => Math.random() - 0.5);
-        return `
-            <div id="quiz-lock" class="card-input">
-                <p><strong>Ujian Terproteksi.</strong> Masukkan sandi:</p>
-                <input type="password" id="quiz-pass-input" style="width:200px">
-                <button class="slcBtn" onclick="
-                    if(web.gebi('quiz-pass-input').value==='${ctx.password}'){
-                        web.gebi('quiz-container').classList.remove('hide');
-                        web.gebi('quiz-lock').classList.add('hide');
-                    } else { alert('Salah!'); }
-                ">Buka</button>
-            </div>
-            <form id="quiz-container" class="dynamic-form hide"
-                onsubmit="event.preventDefault(); web.evaluateQuiz(this, ${JSON.stringify(randomized).replace(/"/g, '&quot;')});">
-                ${randomized.map((q, i) => `
-                    <div class="quiz-box">
-                        <p><strong>${i + 1}. ${q.q}</strong></p>
-                        ${q.options.map(opt =>
-                            `<label><input type="radio" name="q${i}" value="${opt}" required> ${opt}</label>`
-                        ).join('')}
-                    </div>`).join('')}
-                <button type="submit" class="slcBtn">Kirim</button>
-            </form>`;
-    },
+    // [KEAMANAN] Versi bawaan ini SELALU ditimpa oleh quiz.js (lihat
+    // "OVERRIDE — components.quizEngine" di quiz.js) — dibiarkan sebagai
+    // stub aman (bukan implementasi lama yang membandingkan password &
+    // kunci jawaban DI BROWSER) supaya kalau suatu saat quiz.js gagal
+    // dimuat, halaman tidak diam-diam jatuh kembali ke kode yang bocor.
+    quizEngine: () => `<div class="info-card">Modul kuis belum termuat. Muat ulang halaman.</div>`,
 
+    // titleHero.description & hero.description TETAP dirender sebagai
+    // HTML (bukan di-escape) SECARA SENGAJA — keduanya HANYA diisi oleh
+    // konten statis dari pages/*.js (developer, bukan input pengguna) di
+    // sebagian besar halaman. Untuk 1 pengecualian yang datang dari
+    // input pengguna/dosen (deskripsi kursus di web.resolveLearningModule,
+    // deskripsi kuis, dst.) — lihat courses.js/dosen.js — pemanggilnya
+    // WAJIB membungkusnya dengan escHtml() SEBELUM membentuk `d.title`/
+    // `d.description` di sini. title tetap teks polos (escHtml) supaya
+    // tag <h1> tidak pernah bisa "pecah" dari nama akun/judul kursus.
     titleHero: (d) => `
         <div class="row page">
             <div class="artikel">
-                <h1>${d.title}</h1>
+                <h1>${escHtml(d.title)}</h1>
                 ${d.description ? `<p>${d.description}</p>` : ''}
             </div>
         </div>`,
 
     hero: (d) => {
         const media = d.img
-            ? `<img src="${d.img}" alt="${d.title}" class="img-hero">`
+            ? `<img src="${safeUrl(d.img)}" alt="${escHtml(d.title)}" class="img-hero">`
             : d.imgClass
-                ? `<i style="max-width:300px;" class="${d.imgClass} kanan img"></i>`
+                ? `<i style="max-width:300px;" class="${escHtml(d.imgClass)} kanan img"></i>`
                 : '';
         return `
             <div class="row page hero">
                 <div class="col-2-3 artikel">
-                    <h1>${d.title}</h1><br>
-                    <em>${d.tagline}</em> &mdash; ${d.description}<br><br>
-                    ${d.badges.map(b => `<span class="badge">${b}</span>`).join(' ')}
+                    <h1>${escHtml(d.title)}</h1><br>
+                    <em>${escHtml(d.tagline)}</em> &mdash; ${d.description}<br><br>
+                    ${d.badges.map(b => `<span class="badge">${escHtml(b)}</span>`).join(' ')}
                     <br><br>
-                    <a href="?${d.cta.link}" onclick="event.preventDefault(); web.navigate('${d.cta.link}')" class="btn-cta">${d.cta.text}</a>
+                    <a href="?${encodeURIComponent(d.cta.link)}" onclick="event.preventDefault(); web.navigate('${escHtml(d.cta.link)}')" class="btn-cta">${escHtml(d.cta.text)}</a>
                 </div>
                 <div class="col-1-3 artikel">
                     ${media}
@@ -882,7 +936,7 @@ const components = {
                             &#9776; Daftar Modul
                         </button>
                     </div>
-                    <h2>${activeContent.title}</h2><hr>
+                    <h2>${escHtml(activeContent.title)}</h2><hr>
                     <div class="module-body">${components.lineRenderer(activeContent.lines || [], activeContent)}</div>
                 </div>
             </div>`;
@@ -928,6 +982,13 @@ const components = {
             </div>`;
     },
 
+    // [KEAMANAN] `rawKeys`: daftar nama kolom yang isinya MEMANG HTML
+    // (kolom "Aksi" — tautan/tombol yang kita rakit sendiri di
+    // dosen.js/admin.js/quiz.js, bukan input pengguna). Semua kolom LAIN
+    // di-escape sebagai teks polos — sebelumnya SEMUA sel dirender apa
+    // adanya (`<td>${row[k]}</td>`), jadi mis. nama peserta atau judul
+    // kursus yang mengandung HTML akan tereksekusi di tabel manapun ia
+    // tampil (Dashboard Admin, daftar peserta dosen, dst).
     renderTable: (dataTable, opts = {}) => {
         if (!dataTable?.length) return '';
         const allKeys  = Object.keys(dataTable[0]);
@@ -937,13 +998,14 @@ const components = {
             : allKeys.filter(k => !hidden.has(k));
         const labels   = opts.labels || {};
         const startIdx = opts.startIdx || 0;
+        const rawKeys  = new Set(opts.rawKeys || ['Aksi']);
 
         const head = keys.map(k =>
-            `<th>${labels[k] || k.toUpperCase()}</th>`
+            `<th>${escHtml(labels[k] || k.toUpperCase())}</th>`
         ).join('');
 
         const body = dataTable.map((row, i) => {
-            const cells = keys.map(k => `<td>${row[k] ?? ''}</td>`).join('');
+            const cells = keys.map(k => `<td>${rawKeys.has(k) ? (row[k] ?? '') : escHtml(row[k] ?? '')}</td>`).join('');
             const idx   = startIdx + i;
             const click = opts.onRowClick
                 ? `onclick="${opts.onRowClick.replace(/\{i\}/g, idx)}" class="crud-row" title="Klik untuk edit"`
@@ -1016,17 +1078,24 @@ const components = {
     /**
      * [PATCH CERT-FIX] Komponen tampilan sertifikat
      */
+    // [KEAMANAN] d.name = nama profil PESERTA (bisa diubah bebas lewat
+    // Pengaturan Profil) dan d.exam = judul kuis (bisa diubah DOSEN) —
+    // keduanya input pengguna, ditampilkan di halaman verifikasi PUBLIK
+    // (/?cert/<id>, tanpa login). Sebelumnya disisipkan apa adanya —
+    // siapa pun bisa mendaftar, mengisi nama profil dengan payload HTML/
+    // JS, lulus 1 kuis, lalu membagikan tautan sertifikatnya sebagai
+    // stored XSS ke siapa pun yang membuka tautan itu. Di-escape semua.
     certificate: (d) => `
         <div class="row page">
             <div class="cert-border" id="cert-capture-${d.id}">
                 <i class="di-sls img-64"></i>
                 <h1>SERTIFIKAT HASIL UJIAN</h1><hr>
                 <p>Diberikan kepada:</p>
-                <h2 class="cert-name">${d.name}</h2>
-                <p>Materi: <b>${d.exam}</b></p>
-                <div class="cert-score">SKOR: ${d.score}</div>
-                <p>Tanggal: ${d.date}</p>
-                <small>ID: ${d.id}</small><br><br>
+                <h2 class="cert-name">${escHtml(d.name)}</h2>
+                <p>Materi: <b>${escHtml(d.exam)}</b></p>
+                <div class="cert-score">SKOR: ${escHtml(d.score)}</div>
+                <p>Tanggal: ${escHtml(d.date)}</p>
+                <small>ID: ${escHtml(d.id)}</small><br><br>
                 <div class="cert-actions no-print">
                     <button class="slcBtn" onclick="window.print()">Cetak</button>
                     <button class="slcBtn" onclick="web.downloadCertificatePDF('cert-capture-${d.id}','${d.id}',this)">Unduh PDF</button>

@@ -1,11 +1,16 @@
 // ============================================================
 // DOSEN DASHBOARD — /?dosen dan sub-halamannya.
 // ============================================================
-// VERSI ASYNC (D1): setiap fungsi di sini yang (langsung atau tidak
-// langsung, lewat courseSvc/quizSvc) menyentuh db.* sekarang jadi
-// `async function`, dan setiap pemanggilannya diberi `await`. Fungsi
-// murni pembentuk form yang TIDAK butuh data dari db (formTambahKursus)
-// tetap sinkron.
+// VERSI TER-HARDENING: file ini TIDAK BERUBAH secara fungsional dari
+// versi sebelumnya — courseSvc (courses.js) sudah membungkus semua
+// panggilan ke mooc-api (dengan sesi + verifikasi kepemilikan di
+// SERVER, lihat mooc-api/SECURITY.md), jadi dosen.js tetap memanggil
+// courseSvc.* dengan cara yang sama persis seperti sebelumnya.
+// requireOwnedCourse di bawah TETAP dipertahankan sebagai kenyamanan
+// tampilan (supaya dosen langsung melihat pesan "Akses Ditolak" tanpa
+// menunggu balasan server) — TIDAK lagi satu-satunya lapisan
+// pertahanan seperti versi lama, karena server memverifikasi ulang
+// kepemilikan pada SETIAP permintaan tulis.
 //
 // Satu slug 'dosen' menampung beberapa sub-view (kursusku, tambah
 // kursus, modul, tambah materi, update periode, peserta), dibedakan
@@ -291,22 +296,24 @@ const dosenAction = {
         web.openFormFromPage(await dosenView.formEditMateri(slug, itemId, auth.currentUser()));
     },
 
+    // [KEAMANAN] Setiap aksi tulis di bawah dibungkus auth.guardApi() —
+    // menangkap error dari server (validasi field, "Anda bukan pengampu
+    // kursus ini", atau sesi berakhir/401) dan menampilkannya ke dosen,
+    // alih-alih promise rejection senyap seperti versi sebelumnya (yang
+    // memang jarang gagal karena server lama tidak pernah menolak apa pun).
     async submitTambahKursus(form) {
-        const user = auth.currentUser();
         const slug = form.querySelector('[name="slug"]').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
         if (!slug) { alert('Slug tidak boleh kosong.'); return; }
-        if (await courseSvc.get(slug)) { alert('Slug sudah dipakai, gunakan slug lain.'); return; }
         if (web.routes[slug]) { alert('Slug tidak boleh sama dengan halaman sistem, gunakan slug lain.'); return; }
 
-        await courseSvc.create({
+        const created = await auth.guardApi(() => courseSvc.create({
             slug,
             title: form.querySelector('[name="title"]').value.trim(),
             description: form.querySelector('[name="description"]').value.trim(),
             price: form.querySelector('[name="price"]').value.trim() || 'Gratis',
             period: form.querySelector('[name="period"]').value.trim() || 'Self-paced',
-            instructorUsername: user.username,
-            instructorName: user.name
-        });
+        }));
+        if (!created) return;
         await courseSvc.registerRoutes(); // supaya slug baru langsung bisa dibuka tanpa reload
 
         alert('Kursus berhasil dibuat.');
@@ -314,55 +321,61 @@ const dosenAction = {
     },
 
     async submitTambahMateri(form, slug) {
-        await courseSvc.addMaterial(slug, {
+        const ok = await auth.guardApi(() => courseSvc.addMaterial(slug, {
             title: form.querySelector('[name="title"]').value.trim(),
             type: form.querySelector('[name="type"]').value,
             url: form.querySelector('[name="url"]').value.trim()
-        });
-
+        }));
+        if (!ok) return;
         alert('Materi berhasil ditambahkan.');
         web.navigate('dosen/modul:' + slug);
     },
 
     async submitPeriode(form, slug) {
-        await courseSvc.update(slug, { period: form.querySelector('[name="period"]').value.trim() });
+        const ok = await auth.guardApi(() => courseSvc.update(slug, { period: form.querySelector('[name="period"]').value.trim() }));
+        if (!ok) return;
         alert('Periode berhasil diperbarui.');
         web.navigate('dosen');
     },
 
     async submitEditMateri(form, slug, itemId) {
-        await courseSvc.updateMaterial(slug, itemId, {
+        const ok = await auth.guardApi(() => courseSvc.updateMaterial(slug, itemId, {
             title: form.querySelector('[name="title"]').value.trim(),
             type: form.querySelector('[name="type"]').value,
             url: form.querySelector('[name="url"]').value.trim()
-        });
+        }));
+        if (!ok) return;
         alert('Materi berhasil diperbarui.');
         web.navigate('dosen/modul:' + slug);
     },
 
     async hapusMateri(slug, itemId) {
         if (!confirm('Hapus materi ini? Tindakan tidak bisa dibatalkan.')) return;
-        await courseSvc.removeMaterial(slug, itemId);
+        const ok = await auth.guardApi(() => courseSvc.removeMaterial(slug, itemId));
+        if (!ok) return;
         alert('Materi berhasil dihapus.');
         web.navigate('dosen/modul:' + slug);
     },
 
     async submitEditKursus(form, slug) {
-        await courseSvc.update(slug, {
+        const ok = await auth.guardApi(() => courseSvc.update(slug, {
             title: form.querySelector('[name="title"]').value.trim(),
             description: form.querySelector('[name="description"]').value.trim(),
             price: form.querySelector('[name="price"]').value.trim() || 'Gratis',
             period: form.querySelector('[name="period"]').value.trim() || 'Self-paced'
-        });
+        }));
+        if (!ok) return;
         alert('Kursus berhasil diperbarui.');
         web.navigate('dosen');
     },
 
     async hapusKursus(slug) {
         if (!confirm('Hapus kursus ini beserta seluruh materinya? Tindakan tidak bisa dibatalkan.')) return;
-        await courseSvc.remove(slug);
-        // Kuis milik kursus ini (lihat quiz.js) ikut dihapus, kalau ada.
-        if (typeof quizSvc !== 'undefined') await quizSvc.remove(slug);
+        // Kuis milik kursus ini ikut dihapus di SERVER (lihat DELETE
+        // ?table=courses di mooc-api/worker.js) — tidak perlu panggilan
+        // terpisah dari klien lagi.
+        const ok = await auth.guardApi(() => courseSvc.remove(slug));
+        if (!ok) return;
         alert('Kursus berhasil dihapus.');
         web.navigate('dosen');
     }
