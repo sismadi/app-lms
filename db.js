@@ -12,7 +12,7 @@
 // mooc-app (frontend statis) dan mooc-api (Worker) tetap 2 origin
 // berbeda — API_BASE harus URL absolut, bukan path relatif.
 // ============================================================
-const API_ORIGIN = 'https://mooc-api.sismadi.workers.dev';
+const API_ORIGIN = 'https://lms.piawai.workers.dev';
 const PUBLIC_BASE = `${API_ORIGIN}/public`;
 const PRIVATE_BASE = `${API_ORIGIN}/api`;
 
