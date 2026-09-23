@@ -15,8 +15,8 @@
          script.js — kalau ada payload yang lolos, CSP ini mencegahnya
          memuat script dari domain lain atau menjalankan inline
          event-handler yang disuntikkan lewat innerHTML. connect-src
-         mengizinkan panggilan ke mooc-api; sesuaikan kalau origin API
-         berubah. Referensi pola: cms-app (piawai).
+         mengizinkan panggilan ke lms-api (lms.piawai.workers.dev);
+         sesuaikan kalau origin API berubah. Referensi pola: cms-app (piawai).
          Catatan: gembok kuis & form drawer di app ini memang memakai
          inline onclick/onsubmit bawaan (bukan hasil suntikan pengguna),
          jadi 'unsafe-inline' TETAP diberikan pada script-src supaya
@@ -27,7 +27,7 @@
         script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com;
         style-src 'self' 'unsafe-inline';
         img-src 'self' https: data:;
-        connect-src 'self' https://mooc-api.sismadi.workers.dev;
+        connect-src 'self' https://lms.piawai.workers.dev;
         frame-src https:;
         object-src 'none';
         base-uri 'self';
@@ -36,8 +36,8 @@
     <!-- Percepat koneksi pertama ke API (lihat db.js: API_ORIGIN) —
          domainnya SAMA PERSIS dengan yang benar-benar dipanggil, beda
          dari bug preconnect yang ditemukan di referensi cms-app. -->
-    <link rel="preconnect" href="https://mooc-api.sismadi.workers.dev">
-    <link rel="dns-prefetch" href="https://mooc-api.sismadi.workers.dev">
+    <link rel="preconnect" href="https://lms.piawai.workers.dev">
+    <link rel="dns-prefetch" href="https://lms.piawai.workers.dev">
 
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://lms.piawai.id/">
