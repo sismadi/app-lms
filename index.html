@@ -24,10 +24,10 @@
          asal script & koneksi jaringan, lapis utama tetap escHtml(). -->
     <meta http-equiv="Content-Security-Policy" content="
         default-src 'self';
-        script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com;
+        script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://static.cloudflareinsights.com;
         style-src 'self' 'unsafe-inline';
         img-src 'self' https: data:;
-        connect-src 'self' https://lms.piawai.workers.dev;
+        connect-src 'self' https://lms.piawai.workers.dev https://cdnjs.cloudflare.com;
         frame-src https:;
         object-src 'none';
         base-uri 'self';
